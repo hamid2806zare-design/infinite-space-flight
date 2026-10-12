@@ -1,0 +1,1108 @@
+
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Infinite Space Flight</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020510;color:white;font-family:Arial,sans-serif}
+canvas{display:block;width:100vw;height:100vh;touch-action:none}
+#hud{position:fixed;top:12px;left:12px;right:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;pointer-events:none}
+.panel{padding:9px 12px;background:rgba(5,10,29,.88);border:1px solid #344b83;border-radius:8px;font-size:13px}
+#ammo{color:#69ffb1}
+#health{color:#ff7895}
+#soundToggle{pointer-events:auto;padding:8px 11px;font-size:12px;background:#172c55;border:1px solid #5574b8}
+#controls{position:fixed;bottom:10px;left:0;right:0;text-align:center;color:#b8c8ed;font-size:12px;pointer-events:none;text-shadow:0 1px 5px #000}
+#intro{position:fixed;z-index:3;top:50%;left:50%;transform:translate(-50%,-50%);width:min(440px,92vw);max-height:90vh;overflow:auto;padding:25px;text-align:center;background:rgba(3,7,22,.97);border:1px solid #526dc0;border-radius:16px;box-shadow:0 0 40px #192d6a}
+#intro h1{color:#9fe3ff;font-size:25px}
+#intro p{line-height:1.7;color:#d0dcf7}
+button{border:0;border-radius:8px;padding:12px 25px;background:#387dff;color:white;font-size:16px;font-weight:bold;cursor:pointer}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="panel">SCORE: <b id="score">0</b></div>
+  <div class="panel">DISTANCE: <b id="distance">0</b></div>
+  <div class="panel">LASER AMMO: <b id="ammo">100</b></div>
+  <div class="panel">HULL: <b id="health">3 / 3</b></div>
+  <div class="panel">LEVEL: <b id="level">1</b></div>
+  <button id="soundToggle">🔊 SOUND ON</button>
+</div>
+
+<canvas id="game"></canvas>
+
+<div id="intro">
+  <h1>INFINITE SPACE FLIGHT</h1>
+  <p>
+    Fight enemy ships in an endless space battle.<br>
+    Dodge incoming fire, destroy enemies,<br>
+    collect energy and survive!
+  </p>
+  <p>
+    <b>Arrow Keys</b> — Move<br>
+    <b>Hold SPACE</b> — Fire lasers<br>
+    <b>Mouse / Touch</b> — Move ship
+  </p>
+  <button id="start">START FLIGHT</button>
+</div>
+
+<div id="controls">
+  ← → ↑ ↓ Move &nbsp; • &nbsp; Hold SPACE: Fire &nbsp; • &nbsp; Collect energy cells
+</div>
+
+<script>
+(()=>{
+"use strict";
+
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+const $=id=>document.getElementById(id);
+
+let W=innerWidth,H=innerHeight,DPR=1;
+let running=false,last=0,elapsed=0,score=0,distance=0;
+let ammo=100,health=3,level=1;
+const MAX_AMMO=100;
+const keys={left:false,right:false,up:false,down:false,space:false};
+
+let ship,stars,asteroids,enemyShips,lasers,enemyLasers,cells,particles,bursts;
+let asteroidTimer=0,cellTimer=0,enemyTimer=0,laserTimer=0;
+let audioCtx=null,masterGain=null,musicGain=null;
+let musicTimer=null,musicStep=0;
+let soundEnabled=true;
+
+function rand(a,b){return a+Math.random()*(b-a)}
+
+/* ================= AUDIO ================= */
+
+function initAudio(){
+ const AC=window.AudioContext||window.webkitAudioContext;
+ if(!AC)return;
+
+ if(!audioCtx){
+  audioCtx=new AC();
+
+  masterGain=audioCtx.createGain();
+  masterGain.gain.value=.7;
+  masterGain.connect(audioCtx.destination);
+
+  musicGain=audioCtx.createGain();
+  musicGain.gain.value=.65;
+  musicGain.connect(masterGain);
+ }
+
+ if(audioCtx.state==="suspended")audioCtx.resume();
+}
+
+function soundTone(freq,duration,type="sine",volume=.12,endFreq=null,destination=null){
+ if(!soundEnabled||!audioCtx)return;
+
+ const now=audioCtx.currentTime;
+ const osc=audioCtx.createOscillator();
+ const gain=audioCtx.createGain();
+
+ osc.type=type;
+ osc.frequency.setValueAtTime(Math.max(1,freq),now);
+
+ if(endFreq!==null){
+  osc.frequency.exponentialRampToValueAtTime(
+   Math.max(1,endFreq),now+duration
+  );
+ }
+
+ gain.gain.setValueAtTime(.0001,now);
+ gain.gain.exponentialRampToValueAtTime(Math.max(.0002,volume),now+.008);
+ gain.gain.exponentialRampToValueAtTime(.0001,now+duration);
+
+ osc.connect(gain);
+ gain.connect(destination||masterGain);
+ osc.start(now);
+ osc.stop(now+duration+.025);
+}
+
+function noiseSound(duration=.2,volume=.12,cutoff=1200){
+ if(!soundEnabled||!audioCtx)return;
+
+ const length=Math.max(1,Math.floor(audioCtx.sampleRate*duration));
+ const buffer=audioCtx.createBuffer(1,length,audioCtx.sampleRate);
+ const data=buffer.getChannelData(0);
+
+ for(let i=0;i<length;i++){
+  data[i]=(Math.random()*2-1)*(1-i/length);
+ }
+
+ const source=audioCtx.createBufferSource();
+ const filter=audioCtx.createBiquadFilter();
+ const gain=audioCtx.createGain();
+
+ source.buffer=buffer;
+ filter.type="lowpass";
+ filter.frequency.value=cutoff;
+ gain.gain.setValueAtTime(volume,audioCtx.currentTime);
+ gain.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+duration);
+
+ source.connect(filter);
+ filter.connect(gain);
+ gain.connect(masterGain);
+ source.start();
+ source.stop(audioCtx.currentTime+duration);
+}
+
+function playLaserSound(){
+ soundTone(1150,.075,"sawtooth",.055,320);
+ soundTone(1750,.04,"square",.018,750);
+}
+
+function playEnemyShot(){
+ soundTone(360,.13,"sawtooth",.045,130);
+}
+
+function playExplosion(){
+ noiseSound(.32,.17,1000);
+ soundTone(125,.3,"sawtooth",.12,38);
+}
+
+function playHit(){
+ soundTone(180,.22,"square",.12,60);
+ noiseSound(.16,.08,550);
+}
+
+function playCollect(){
+ soundTone(620,.12,"sine",.1,920);
+ setTimeout(()=>soundTone(920,.15,"sine",.08,1300),75);
+}
+
+function playEnemyDestroyed(){
+ soundTone(420,.14,"triangle",.1,170);
+ setTimeout(()=>noiseSound(.25,.13,1600),65);
+}
+
+function playGameOver(){
+ soundTone(260,.4,"sawtooth",.12,110);
+ setTimeout(()=>soundTone(150,.65,"triangle",.1,48),280);
+}
+
+/* ================= MUSIC ================= */
+
+function startMusic(){
+ if(!audioCtx||!soundEnabled||musicTimer)return;
+
+ musicStep=0;
+
+ const melody=[220,261.63,329.63,392,329.63,293.66,261.63,349.23];
+ const bass=[55,55,73.42,55,65.41,65.41,82.41,65.41];
+
+ function musicBeat(){
+  if(!running||!soundEnabled||!audioCtx)return;
+
+  const step=musicStep%16;
+  const bar=Math.floor(musicStep/16);
+  const energy=1+Math.min(level-1,5)*.08;
+
+  // بیس
+  if(step%4===0){
+   soundTone(75,.22,"sine",.24*energy,37,musicGain);
+   soundTone(
+    bass[Math.floor(step/2)%8],
+    .16,"triangle",.13,null,musicGain
+   );
+  }
+
+  // پرکاشن
+  if(step%4===2){
+   noiseSound(.10,.10,2400);
+  }
+
+  // های‌هت
+  if(step%2===1){
+   noiseSound(.035,.045,7000);
+  }
+
+  // آرپژ
+  const note=melody[(step+bar)%melody.length];
+  soundTone(note,.13,"sawtooth",.038*energy,note*1.01,musicGain);
+
+  if(step%4===0){
+   soundTone(note/2,.24,"triangle",.07*energy,note/2*.98,musicGain);
+  }
+
+  if(step===15){
+   soundTone(melody[(bar+3)%melody.length]*2,.12,"square",.025,null,musicGain);
+  }
+
+  musicStep++;
+ }
+
+ musicBeat();
+ musicTimer=setInterval(musicBeat,150);
+}
+
+function stopMusic(){
+ if(musicTimer){
+  clearInterval(musicTimer);
+  musicTimer=null;
+ }
+}
+
+function setSound(on){
+ soundEnabled=on;
+ $("soundToggle").textContent=on?"🔊 SOUND ON":"🔇 SOUND OFF";
+
+ if(!on){
+  stopMusic();
+ }else{
+  initAudio();
+  if(running)startMusic();
+ }
+}
+
+$("soundToggle").addEventListener("click",()=>{
+ setSound(!soundEnabled);
+});
+
+/* ================= GAME SETUP ================= */
+
+function resize(){
+ W=innerWidth;
+ H=innerHeight;
+ DPR=Math.min(devicePixelRatio||1,2);
+
+ canvas.width=Math.floor(W*DPR);
+ canvas.height=Math.floor(H*DPR);
+ canvas.style.width=W+"px";
+ canvas.style.height=H+"px";
+
+ ctx.setTransform(DPR,0,0,DPR,0,0);
+
+ if(ship){
+  ship.x=Math.max(30,Math.min(W-30,ship.x));
+  ship.y=Math.max(65,Math.min(H-45,ship.y));
+ }
+
+ makeStars();
+}
+
+addEventListener("resize",resize);
+
+function makeStars(){
+ stars=[];
+ for(let i=0;i<220;i++){
+  stars.push({
+   x:Math.random()*W,
+   y:Math.random()*H,
+   size:rand(.5,2),
+   speed:rand(50,280),
+   alpha:rand(.2,.9)
+  });
+ }
+}
+
+function reset(){
+ elapsed=score=distance=0;
+ ammo=100;
+ health=3;
+ level=1;
+
+ ship={x:W*.5,y:H*.72,speed:340,invulnerable:0};
+
+ asteroids=[];
+ enemyShips=[];
+ lasers=[];
+ enemyLasers=[];
+ cells=[];
+ particles=[];
+ bursts=[];
+
+ asteroidTimer=.5;
+ cellTimer=2;
+ enemyTimer=2.5;
+ laserTimer=0;
+
+ for(const k in keys)keys[k]=false;
+
+ updateHUD();
+}
+
+function updateHUD(){
+ $("score").textContent=Math.floor(score);
+ $("distance").textContent=Math.floor(distance);
+ $("ammo").textContent=ammo;
+ $("health").textContent=health+" / 3";
+ $("level").textContent=level;
+}
+
+function spawnAsteroid(){
+ const r=rand(17,42);
+
+ asteroids.push({
+  x:rand(-r,W+r),y:-r,r,
+  vx:rand(-48,48),
+  vy:rand(115,190)+level*9,
+  rot:rand(0,6.28),
+  spin:rand(-.9,.9),
+  shape:Array.from({length:11},()=>rand(.78,1.15))
+ });
+}
+
+function spawnCell(){
+ cells.push({
+  x:rand(25,Math.max(26,W-25)),
+  y:-24,size:21,
+  vy:rand(100,145),
+  phase:rand(0,6.28)
+ });
+}
+
+function spawnEnemy(){
+ enemyShips.push({
+  x:rand(40,Math.max(41,W-40)),
+  y:-45,
+  vx:rand(-65,65),
+  vy:rand(100,145)+level*4,
+  phase:rand(0,6.28),
+  hp:2,
+  fireTimer:rand(.6,1.6)
+ });
+}
+
+function laserFire(){
+ if(ammo<=0)return;
+
+ ammo--;
+ playLaserSound();
+
+ lasers.push({x:ship.x-9,y:ship.y-19,vy:-680});
+ lasers.push({x:ship.x+9,y:ship.y-19,vy:-680});
+
+ for(let i=0;i<4;i++){
+  particles.push({
+   x:ship.x+rand(-12,12),y:ship.y-22,
+   vx:rand(-25,25),vy:rand(-100,-30),
+   life:.13,max:.13,color:"#7ffaff",size:3
+  });
+ }
+}
+
+/*
+ * تیر دشمن:
+ * ۱. همیشه رو به پایین حرکت می‌کند.
+ * ۲. زاویهٔ افقی حداکثر ۴۵ درجه است.
+ * ۳. هرگز به سمت بالا یا افقی شلیک نمی‌شود.
+ */
+function enemyFire(e){
+ const sx=e.x;
+ const sy=e.y+20;
+
+ const dx=ship.x-sx;
+ const dy=Math.max(1,ship.y-sy);
+
+ // زاویه نسبت به جهت عمودی رو به پایین
+ const maxAngle=Math.PI/4;
+ const angle=Math.max(
+  -maxAngle,
+  Math.min(maxAngle,Math.atan2(dx,dy))
+ );
+
+ const speed=270+Math.min(level*7,100);
+
+ enemyLasers.push({
+  x:sx,
+  y:sy,
+  vx:Math.sin(angle)*speed,
+  vy:Math.cos(angle)*speed,
+  r:5,
+  damage:1
+ });
+
+ playEnemyShot();
+
+ // نور دهانهٔ اسلحه
+ for(let i=0;i<3;i++){
+  particles.push({
+   x:sx+rand(-4,4),y:sy,
+   vx:rand(-25,25),vy:rand(10,55),
+   life:.12,max:.12,
+   color:"#ff6b54",size:3
+  });
+ }
+}
+
+function burst(x,y,color="#6cf7ff",count=18){
+ bursts.push({x,y,r:0,life:.3,max:.3,color});
+
+ for(let i=0;i<count;i++){
+  const a=Math.random()*Math.PI*2;
+  const s=rand(40,220);
+
+  particles.push({
+   x,y,
+   vx:Math.cos(a)*s,
+   vy:Math.sin(a)*s,
+   life:rand(.25,.7),max:.7,
+   color,size:rand(2,5)
+  });
+ }
+}
+
+function damage(){
+ if(ship.invulnerable>0)return;
+
+ health--;
+ ship.invulnerable=1.4;
+
+ playHit();
+ burst(ship.x,ship.y,"#ff6489",24);
+
+ if(health<=0)gameOver();
+}
+
+function gameOver(){
+ running=false;
+ stopMusic();
+
+ for(const k in keys)keys[k]=false;
+
+ playGameOver();
+
+ $("intro").classList.remove("hidden");
+ $("intro").innerHTML=`
+ <h1>SHIP DESTROYED</h1>
+ <p>Flight distance: <b>${Math.floor(distance)}</b><br>
+ Final score: <b>${Math.floor(score)}</b></p>
+ <button id="start">FLY AGAIN</button>`;
+
+ $("start").addEventListener("click",startGame);
+}
+
+/* ================= UPDATE ================= */
+
+function update(dt){
+ elapsed+=dt;
+ distance+=dt*24;
+ score+=dt*2;
+ level=1+Math.floor(distance/600);
+
+ // حرکت بازیکن
+ let dx=(keys.right?1:0)-(keys.left?1:0);
+ let dy=(keys.down?1:0)-(keys.up?1:0);
+
+ if(dx&&dy){dx*=.707;dy*=.707}
+
+ ship.x+=dx*ship.speed*dt;
+ ship.y+=dy*ship.speed*dt;
+
+ ship.x=Math.max(24,Math.min(W-24,ship.x));
+ ship.y=Math.max(60,Math.min(H-36,ship.y));
+ ship.invulnerable=Math.max(0,ship.invulnerable-dt);
+
+ // شلیک پیوسته بازیکن
+ laserTimer-=dt;
+
+ if(keys.space&&laserTimer<=0){
+  if(ammo>0)laserFire();
+  laserTimer=.16;
+ }
+
+ // تعداد کمتر شهاب‌سنگ‌ها
+ asteroidTimer-=dt;
+ if(asteroidTimer<=0){
+  spawnAsteroid();
+  asteroidTimer=Math.max(.65,rand(.85,1.25)-level*.008);
+ }
+
+ // سلول انرژی
+ cellTimer-=dt;
+ if(cellTimer<=0){
+  spawnCell();
+  cellTimer=rand(3.5,5.1);
+ }
+
+ // دشمن‌ها
+ enemyTimer-=dt;
+ if(enemyTimer<=0){
+  spawnEnemy();
+  enemyTimer=Math.max(1.25,rand(2.0,3.0)-level*.055);
+ }
+
+ // ستاره‌ها
+ for(const s of stars){
+  s.y+=s.speed*dt*(1+level*.025);
+
+  if(s.y>H+8){
+   s.y=-8;
+   s.x=Math.random()*W;
+   s.speed=rand(50,280);
+  }
+ }
+
+ // حرکت شهاب‌سنگ‌ها و برخورد
+ for(const a of asteroids){
+  a.x+=a.vx*dt;
+  a.y+=a.vy*dt;
+  a.rot+=a.spin*dt;
+
+  if(a.x<-a.r)a.x=W+a.r;
+  if(a.x>W+a.r)a.x=-a.r;
+
+  if(Math.hypot(a.x-ship.x,a.y-ship.y)<a.r+15){
+   a.remove=true;
+   damage();
+   if(!running)return;
+  }
+ }
+
+ asteroids=asteroids.filter(a=>!a.remove&&a.y<H+80);
+
+ // حرکت دشمن‌ها و شلیک به بازیکن
+ for(const e of enemyShips){
+  e.x+=e.vx*dt+Math.sin(elapsed*2+e.phase)*45*dt;
+  e.y+=e.vy*dt;
+
+  if(e.x<25||e.x>W-25)e.vx*=-1;
+
+  e.fireTimer-=dt;
+
+  if(e.fireTimer<=0&&e.y>0&&e.y<H*.85){
+   enemyFire(e);
+   e.fireTimer=rand(1.1,2.0)-Math.min(level*.035,.35);
+   e.fireTimer=Math.max(.65,e.fireTimer);
+  }
+
+  if(Math.hypot(e.x-ship.x,e.y-ship.y)<27){
+   e.remove=true;
+   damage();
+   if(!running)return;
+  }
+ }
+
+ enemyShips=enemyShips.filter(e=>!e.remove&&e.y<H+70);
+
+ // حرکت لیزر بازیکن
+ for(const l of lasers)l.y+=l.vy*dt;
+
+ // برخورد لیزر بازیکن با سنگ و دشمن
+ for(const l of lasers){
+  if(l.remove)continue;
+
+  for(const a of asteroids){
+   if(a.remove)continue;
+
+   if(Math.hypot(l.x-a.x,l.y-a.y)<a.r*.85){
+    l.remove=true;
+    a.remove=true;
+    score+=15;
+    burst(a.x,a.y,"#8af8ff",12);
+    playExplosion();
+    break;
+   }
+  }
+
+  if(l.remove)continue;
+
+  for(const e of enemyShips){
+   if(e.remove)continue;
+
+   if(Math.hypot(l.x-e.x,l.y-e.y)<23){
+    l.remove=true;
+    e.hp--;
+
+    if(e.hp<=0){
+     e.remove=true;
+     score+=40;
+     burst(e.x,e.y,"#ff8dff",20);
+     playEnemyDestroyed();
+    }else{
+     soundTone(240,.07,"square",.04,120);
+    }
+    break;
+   }
+  }
+ }
+
+ lasers=lasers.filter(l=>!l.remove&&l.y>-30);
+ asteroids=asteroids.filter(a=>!a.remove&&a.y<H+80);
+ enemyShips=enemyShips.filter(e=>!e.remove&&e.y<H+70);
+
+ // حرکت تیرهای دشمن و برخورد با سفینه
+ for(const l of enemyLasers){
+  l.x+=l.vx*dt;
+  l.y+=l.vy*dt;
+
+  if(!l.remove&&Math.hypot(l.x-ship.x,l.y-ship.y)<17){
+   l.remove=true;
+   damage();
+
+   burst(l.x,l.y,"#ff624f",8);
+
+   if(!running)return;
+  }
+ }
+
+ enemyLasers=enemyLasers.filter(l=>
+  !l.remove&&l.x>-30&&l.x<W+30&&l.y>-30&&l.y<H+30
+ );
+
+ // انرژی
+ for(const c of cells){
+  c.y+=c.vy*dt;
+  c.phase+=dt*3;
+  c.x+=Math.sin(c.phase)*20*dt;
+
+  if(Math.hypot(c.x-ship.x,c.y-ship.y)<30){
+   c.remove=true;
+   ammo=Math.min(MAX_AMMO,ammo+25);
+   score+=20;
+   burst(c.x,c.y,"#65ffba",15);
+   playCollect();
+  }
+ }
+
+ cells=cells.filter(c=>!c.remove&&c.y<H+40);
+
+ // انفجارها
+ for(const b of bursts){
+  b.life-=dt;
+  b.r+=180*dt;
+ }
+ bursts=bursts.filter(b=>b.life>0);
+
+ // ذرات
+ for(const p of particles){
+  p.x+=p.vx*dt;
+  p.y+=p.vy*dt;
+  p.vx*=.985;
+  p.vy*=.985;
+  p.life-=dt;
+ }
+ particles=particles.filter(p=>p.life>0);
+
+ updateHUD();
+}
+
+/* ================= DRAW ================= */
+
+function drawBackground(){
+ const g=ctx.createLinearGradient(0,0,W,H);
+ g.addColorStop(0,"#02040e");
+ g.addColorStop(.5,"#0a1231");
+ g.addColorStop(1,"#030817");
+
+ ctx.fillStyle=g;
+ ctx.fillRect(0,0,W,H);
+
+ const neb=ctx.createRadialGradient(
+  W*.75,H*.28,0,W*.75,H*.28,Math.max(W,H)*.55
+ );
+ neb.addColorStop(0,"rgba(89,34,163,.25)");
+ neb.addColorStop(.5,"rgba(25,74,155,.1)");
+ neb.addColorStop(1,"rgba(0,0,0,0)");
+
+ ctx.fillStyle=neb;
+ ctx.fillRect(0,0,W,H);
+
+ for(const s of stars){
+  ctx.globalAlpha=s.alpha;
+  ctx.strokeStyle="#b8d7ff";
+  ctx.lineWidth=s.size;
+  ctx.beginPath();
+  ctx.moveTo(s.x,s.y);
+  ctx.lineTo(s.x,s.y-s.speed*.035);
+  ctx.stroke();
+ }
+ ctx.globalAlpha=1;
+
+ // سیاره
+ const px=W*.18,py=H*.25,r=Math.min(W,H)*.07;
+ ctx.save();
+ ctx.globalAlpha=.45;
+
+ const pg=ctx.createRadialGradient(px-r*.4,py-r*.4,1,px,py,r);
+ pg.addColorStop(0,"#c7c9ff");
+ pg.addColorStop(.5,"#5b65b9");
+ pg.addColorStop(1,"#191a48");
+
+ ctx.fillStyle=pg;
+ ctx.beginPath();
+ ctx.arc(px,py,r,0,Math.PI*2);
+ ctx.fill();
+
+ ctx.strokeStyle="#8a9aff";
+ ctx.lineWidth=3;
+ ctx.beginPath();
+ ctx.ellipse(px,py,r*1.65,r*.42,-.3,0,Math.PI*2);
+ ctx.stroke();
+ ctx.restore();
+}
+
+function drawAsteroid(a){
+ ctx.save();
+ ctx.translate(a.x,a.y);
+ ctx.rotate(a.rot);
+
+ ctx.shadowColor="rgba(0,0,0,.65)";
+ ctx.shadowBlur=12;
+ ctx.shadowOffsetX=4;
+ ctx.shadowOffsetY=6;
+
+ ctx.beginPath();
+ for(let i=0;i<a.shape.length;i++){
+  const ang=i/a.shape.length*Math.PI*2;
+  const rr=a.r*a.shape[i];
+  const x=Math.cos(ang)*rr;
+  const y=Math.sin(ang)*rr;
+  if(i===0)ctx.moveTo(x,y);
+  else ctx.lineTo(x,y);
+ }
+ ctx.closePath();
+
+ const g=ctx.createRadialGradient(-a.r*.38,-a.r*.4,1,a.r*.12,a.r*.15,a.r*1.35);
+ g.addColorStop(0,"#b0a99c");
+ g.addColorStop(.22,"#77776f");
+ g.addColorStop(.52,"#4b4c4b");
+ g.addColorStop(.8,"#292d32");
+ g.addColorStop(1,"#111722");
+
+ ctx.fillStyle=g;
+ ctx.fill();
+
+ ctx.shadowBlur=0;
+ ctx.shadowOffsetX=0;
+ ctx.shadowOffsetY=0;
+ ctx.strokeStyle="#999c9a";
+ ctx.lineWidth=1.5;
+ ctx.stroke();
+
+ const craters=[
+  {x:-.28,y:-.18,r:.18},
+  {x:.30,y:-.30,r:.12},
+  {x:.22,y:.25,r:.20},
+  {x:-.35,y:.38,r:.10}
+ ];
+
+ for(const c of craters){
+  const cx=c.x*a.r,cy=c.y*a.r,cr=c.r*a.r;
+  const cg=ctx.createRadialGradient(cx-cr*.25,cy-cr*.3,1,cx,cy,cr*1.3);
+  cg.addColorStop(0,"#171b20");
+  cg.addColorStop(.7,"#30343a");
+  cg.addColorStop(1,"#656760");
+
+  ctx.fillStyle=cg;
+  ctx.beginPath();
+  ctx.ellipse(cx,cy,cr*1.25,cr*.85,-.35,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.strokeStyle="rgba(190,187,169,.48)";
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.ellipse(cx-cr*.06,cy-cr*.08,cr*1.12,cr*.72,-.35,Math.PI*.95,Math.PI*2.05);
+  ctx.stroke();
+ }
+
+ ctx.strokeStyle="rgba(18,22,27,.75)";
+ ctx.lineWidth=1.4;
+ ctx.beginPath();
+ ctx.moveTo(-a.r*.55,-a.r*.05);
+ ctx.lineTo(-a.r*.35,a.r*.08);
+ ctx.lineTo(-a.r*.42,a.r*.25);
+ ctx.moveTo(a.r*.15,-a.r*.65);
+ ctx.lineTo(a.r*.08,-a.r*.42);
+ ctx.lineTo(a.r*.25,-a.r*.30);
+ ctx.stroke();
+
+ ctx.strokeStyle="rgba(224,219,201,.5)";
+ ctx.lineWidth=1.2;
+ ctx.beginPath();
+ ctx.moveTo(-a.r*.45,-a.r*.45);
+ ctx.lineTo(-a.r*.12,-a.r*.62);
+ ctx.lineTo(a.r*.12,-a.r*.58);
+ ctx.stroke();
+
+ ctx.restore();
+}
+
+function drawEnemy(e){
+ ctx.save();
+ ctx.translate(e.x,e.y);
+
+ ctx.shadowColor="#db80ff";
+ ctx.shadowBlur=13;
+
+ const g=ctx.createLinearGradient(-25,-15,25,20);
+ g.addColorStop(0,"#ffddff");
+ g.addColorStop(.5,"#d179ff");
+ g.addColorStop(1,"#6936b8");
+
+ ctx.fillStyle=g;
+ ctx.strokeStyle="#f1b7ff";
+ ctx.lineWidth=1.5;
+
+ ctx.beginPath();
+ ctx.moveTo(0,25);
+ ctx.lineTo(-8,5);
+ ctx.lineTo(-26,-5);
+ ctx.lineTo(-20,-12);
+ ctx.lineTo(-5,-7);
+ ctx.lineTo(0,-22);
+ ctx.lineTo(5,-7);
+ ctx.lineTo(20,-12);
+ ctx.lineTo(26,-5);
+ ctx.lineTo(8,5);
+ ctx.closePath();
+ ctx.fill();
+ ctx.stroke();
+
+ ctx.shadowBlur=0;
+ ctx.fillStyle="#69eaff";
+ ctx.fillRect(-3,-3,6,12);
+
+ ctx.fillStyle="#ff547b";
+ ctx.fillRect(-17,-7,5,3);
+ ctx.fillRect(12,-7,5,3);
+
+ ctx.restore();
+}
+
+function drawCell(c){
+ ctx.save();
+ ctx.translate(c.x,c.y);
+ ctx.rotate(Math.sin(c.phase)*.15);
+
+ ctx.shadowColor="#50ffc1";
+ ctx.shadowBlur=15;
+ ctx.fillStyle="#0c5e4c";
+ ctx.fillRect(-12,-12,24,24);
+
+ ctx.strokeStyle="#65ffbd";
+ ctx.lineWidth=2;
+ ctx.strokeRect(-12,-12,24,24);
+
+ ctx.fillStyle="#8affd0";
+ ctx.fillRect(-3,-8,6,16);
+ ctx.fillRect(-8,-3,16,6);
+
+ ctx.restore();
+}
+
+function drawShip(){
+ ctx.save();
+ ctx.translate(ship.x,ship.y);
+
+ if(ship.invulnerable>0&&Math.floor(ship.invulnerable*14)%2===0){
+  ctx.globalAlpha=.35;
+ }
+
+ ctx.shadowColor="#51dfff";
+ ctx.shadowBlur=18;
+
+ const grad=ctx.createLinearGradient(-22,0,22,0);
+ grad.addColorStop(0,"#3558c8");
+ grad.addColorStop(.5,"#c9f8ff");
+ grad.addColorStop(1,"#3558c8");
+
+ ctx.fillStyle=grad;
+ ctx.strokeStyle="#9beeff";
+ ctx.lineWidth=1.5;
+
+ ctx.beginPath();
+ ctx.moveTo(0,-27);
+ ctx.lineTo(9,-7);
+ ctx.lineTo(22,12);
+ ctx.lineTo(12,17);
+ ctx.lineTo(5,11);
+ ctx.lineTo(0,19);
+ ctx.lineTo(-5,11);
+ ctx.lineTo(-12,17);
+ ctx.lineTo(-22,12);
+ ctx.lineTo(-9,-7);
+ ctx.closePath();
+ ctx.fill();
+ ctx.stroke();
+
+ ctx.shadowColor="#3bf4ff";
+ ctx.shadowBlur=16;
+ ctx.fillStyle="#54f7ff";
+
+ ctx.beginPath();
+ ctx.moveTo(-6,14);
+ ctx.lineTo(0,28+Math.random()*5);
+ ctx.lineTo(6,14);
+ ctx.closePath();
+ ctx.fill();
+
+ ctx.shadowBlur=0;
+ ctx.fillStyle="#b9ffff";
+ ctx.beginPath();
+ ctx.ellipse(0,-7,4,9,0,0,Math.PI*2);
+ ctx.fill();
+
+ ctx.restore();
+}
+
+function draw(){
+ drawBackground();
+
+ for(const a of asteroids)drawAsteroid(a);
+ for(const c of cells)drawCell(c);
+ for(const e of enemyShips)drawEnemy(e);
+
+ // لیزرهای بازیکن
+ for(const l of lasers){
+  ctx.save();
+  ctx.shadowColor="#4ffaff";
+  ctx.shadowBlur=17;
+  ctx.strokeStyle="#d8ffff";
+  ctx.lineWidth=3;
+
+  ctx.beginPath();
+  ctx.moveTo(l.x,l.y+17);
+  ctx.lineTo(l.x,l.y-12);
+  ctx.stroke();
+
+  ctx.strokeStyle="#35dfff";
+  ctx.lineWidth=7;
+  ctx.globalAlpha=.3;
+  ctx.beginPath();
+  ctx.moveTo(l.x,l.y+16);
+  ctx.lineTo(l.x,l.y-12);
+  ctx.stroke();
+  ctx.restore();
+ }
+
+ // تیرهای دشمن؛ جهت ظاهری با مسیر حرکت هماهنگ است
+ for(const l of enemyLasers){
+  ctx.save();
+  ctx.translate(l.x,l.y);
+  ctx.rotate(Math.atan2(l.vy,l.vx)+Math.PI/2);
+
+  ctx.shadowColor="#ff392f";
+  ctx.shadowBlur=17;
+
+  ctx.strokeStyle="#fff2a8";
+  ctx.lineWidth=3;
+  ctx.beginPath();
+  ctx.moveTo(0,-12);
+  ctx.lineTo(0,12);
+  ctx.stroke();
+
+  ctx.strokeStyle="#ff392f";
+  ctx.lineWidth=7;
+  ctx.globalAlpha=.45;
+  ctx.beginPath();
+  ctx.moveTo(0,-11);
+  ctx.lineTo(0,11);
+  ctx.stroke();
+
+  ctx.restore();
+ }
+
+ for(const b of bursts){
+  ctx.globalAlpha=Math.max(0,b.life/b.max);
+  ctx.strokeStyle=b.color;
+  ctx.lineWidth=3;
+  ctx.beginPath();
+  ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+  ctx.stroke();
+ }
+ ctx.globalAlpha=1;
+
+ for(const p of particles){
+  ctx.globalAlpha=Math.max(0,p.life/p.max);
+  ctx.fillStyle=p.color;
+  ctx.fillRect(p.x,p.y,p.size,p.size);
+ }
+ ctx.globalAlpha=1;
+
+ if(ship)drawShip();
+}
+
+/* ================= GAME LOOP ================= */
+
+function loop(now){
+ if(!running)return;
+
+ const dt=Math.min((now-last)/1000||0,.035);
+ last=now;
+
+ update(dt);
+ draw();
+
+ if(running)requestAnimationFrame(loop);
+}
+
+function startGame(){
+ initAudio();
+ reset();
+ running=true;
+
+ $("intro").classList.add("hidden");
+
+ if(soundEnabled)startMusic();
+
+ last=performance.now();
+ requestAnimationFrame(loop);
+}
+
+$("start").addEventListener("click",startGame);
+
+/* صفحه‌کلید */
+function keyMap(code){
+ return {
+  ArrowLeft:"left",
+  ArrowRight:"right",
+  ArrowUp:"up",
+  ArrowDown:"down",
+  Space:"space"
+ }[code];
+}
+
+addEventListener("keydown",e=>{
+ const k=keyMap(e.code);
+ if(k){
+  e.preventDefault();
+  keys[k]=true;
+ }
+});
+
+addEventListener("keyup",e=>{
+ const k=keyMap(e.code);
+ if(k){
+  e.preventDefault();
+  keys[k]=false;
+ }
+});
+
+addEventListener("blur",()=>{
+ for(const k in keys)keys[k]=false;
+});
+
+/* ماوس و لمس */
+function moveShipTo(x,y){
+ if(!running)return;
+ ship.x=Math.max(24,Math.min(W-24,x));
+ ship.y=Math.max(60,Math.min(H-36,y));
+}
+
+canvas.addEventListener("pointerdown",e=>{
+ if(running){
+  moveShipTo(e.clientX,e.clientY);
+  if(e.pointerType==="touch")e.preventDefault();
+ }
+});
+
+canvas.addEventListener("pointermove",e=>{
+ if(running&&e.buttons===1){
+  moveShipTo(e.clientX,e.clientY);
+ }
+});
+
+resize();
+reset();
+draw();
+
+})();
+</script>
+</body>
+</html>
